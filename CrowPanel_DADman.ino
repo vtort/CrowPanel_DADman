@@ -196,7 +196,7 @@ void drawSprite() {
     sprite = pikachu_normal;
     sx = SPRITE_X_NORMAL; sy = SPRITE_Y_NORMAL;
   }
-  gfx->draw16bitBeRGBBitmap(sx, sy, (uint16_t*)sprite, PIKACHU_NORMAL_SIZE, PIKACHU_NORMAL_SIZE);
+  gfx->draw16bitRGBBitmap(sx, sy, (uint16_t*)sprite, PIKACHU_NORMAL_SIZE, PIKACHU_NORMAL_SIZE);
 }
 
 void drawDisplay() {
