@@ -9,6 +9,7 @@
 
 #include <Arduino_GFX_Library.h>
 #include <math.h>
+#include <Wire.h>
 #include <Adafruit_NeoPixel.h>
 #include "USB.h"
 #include "USBMIDI.h"
@@ -31,6 +32,12 @@ Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 #define ENC_A        45
 #define ENC_B        42
 #define ENC_SW       41
+
+#define TOUCH_SDA     6
+#define TOUCH_SCL     7
+#define TOUCH_RST     8
+#define TOUCH_INT     0
+#define TOUCH_ADDR 0x15   // dirección I2C del CST816S
 
 // ── MIDI ──────────────────────────────────────────────────────────────────
 #define MIDI_CH       0
@@ -71,6 +78,8 @@ bool  muted   = false;
 bool  lastBtn = HIGH;
 unsigned long lastDebounce  = 0;
 unsigned long lastActiveMs  = 0;   // para volver a normal tras girar
+unsigned long lastActivityMs = 0;  // para apagar pantalla por inactividad
+bool screenOn = true;
 unsigned long lastClickMs   = 0;   // para detectar doble click
 bool          waitingDouble = false;
 bool needsRedraw   = true;
@@ -102,9 +111,16 @@ void setup() {
   gfx->begin();
   gfx->fillScreen(C_BG);
 
-  pinMode(ENC_A,  INPUT_PULLUP);
-  pinMode(ENC_B,  INPUT_PULLUP);
-  pinMode(ENC_SW, INPUT_PULLUP);
+  pinMode(ENC_A,    INPUT_PULLUP);
+  pinMode(ENC_B,    INPUT_PULLUP);
+  pinMode(ENC_SW,   INPUT_PULLUP);
+  pinMode(TOUCH_INT, INPUT_PULLUP);
+
+  // Inicializar CST816S
+  pinMode(TOUCH_RST, OUTPUT);
+  digitalWrite(TOUCH_RST, LOW);  delay(10);
+  digitalWrite(TOUCH_RST, HIGH); delay(50);
+  Wire.begin(TOUCH_SDA, TOUCH_SCL);
   encState = (digitalRead(ENC_A) << 1) | digitalRead(ENC_B);
 
   MidiUSB.begin();
@@ -124,7 +140,38 @@ void loop() {
   }
 
 
+  // Apagar pantalla tras 5s de inactividad
+  if (screenOn && millis() - lastActivityMs > 5000) {
+    analogWrite(TFT_BL, 0);
+    screenOn = false;
+  }
+
+  // Toque en pantalla → encender sin cambiar nada (polling I2C cada 100ms)
+  static unsigned long lastTouchPoll = 0;
+  if (!screenOn && millis() - lastTouchPoll > 100) {
+    lastTouchPoll = millis();
+    Wire.beginTransmission(TOUCH_ADDR);
+    Wire.write(0x02);  // registro finger_num
+    if (Wire.endTransmission(false) == 0) {
+      Wire.requestFrom(TOUCH_ADDR, 1);
+      uint8_t fingers = Wire.available() ? Wire.read() : 0;
+      if (fingers > 0) {
+        lastActivityMs = millis();
+        analogWrite(TFT_BL, 200);
+        screenOn    = true;
+        firstDraw   = true;
+        needsRedraw = true;
+      }
+    }
+  }
+
   if (needsRedraw) {
+    // Si la pantalla estaba apagada, encenderla y redibujar todo
+    if (!screenOn) {
+      analogWrite(TFT_BL, 200);
+      screenOn  = true;
+      firstDraw = true;
+    }
     drawDisplay();
     needsRedraw = false;
   }
@@ -143,14 +190,16 @@ void handleEncoder() {
     if (encAccum >= 4) {
       dadDB = constrain(round((dadDB + 0.5f) * 2.0f) / 2.0f, DAD_MIN, DAD_MAX);
       encAccum     = 0;
-      lastActiveMs = millis();
+      lastActiveMs   = millis();
+      lastActivityMs = millis();
       if (!muted) currentState = STATE_ACTIVE;
       sendVolume();
       needsRedraw = true;
     } else if (encAccum <= -4) {
       dadDB = constrain(round((dadDB - 0.5f) * 2.0f) / 2.0f, DAD_MIN, DAD_MAX);
-      encAccum     = 0;
-      lastActiveMs = millis();
+      encAccum       = 0;
+      lastActiveMs   = millis();
+      lastActivityMs = millis();
       if (!muted) currentState = STATE_ACTIVE;
       sendVolume();
       needsRedraw = true;
@@ -178,8 +227,9 @@ void handleButton() {
         needsRedraw = true;
       } else {
         // ── Primer click: mute inmediato
-        waitingDouble = true;
-        lastClickMs   = now;
+        waitingDouble  = true;
+        lastClickMs    = now;
+        lastActivityMs = now;
         muted = !muted;
         currentState = muted ? STATE_MUTE : STATE_NORMAL;
         MidiUSB.noteOn(MIDI_CH, NOTE_MUTE, muted ? 127 : 0);
