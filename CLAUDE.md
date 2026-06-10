@@ -13,6 +13,7 @@ Controlador de volumen master para DADman (software de audio para MTRX Studio) u
 - LCD_PWR_EN1 = GPIO1, LCD_PWR_EN2 = GPIO2 → deben estar en HIGH o la pantalla no arranca
 - TFT_BL = GPIO46 → backlight via `analogWrite(46, 200)`
 - ENC_A = 45, ENC_B = 42, ENC_SW = 41
+- Touch CST816S I2C: SDA=6, SCL=7, RST=8, INT=0, addr=0x15
 
 ## Lógica de volumen
 - DADman range: -100 a +12 dB
@@ -48,8 +49,18 @@ arduino-cli upload --fqbn "esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default
 - CC7 canal 1 = master volume
 - Note 18 canal 1 = mute toggle
 
+## Funciones implementadas
+- Encoder: 0.5 dB/detent, 4 subpasos
+- Click simple → mute/unmute instantáneo
+- Doble click (<300ms) → reset a 0 dB DADman (79 dB SPL)
+- Sleep pantalla: apaga backlight tras 5s inactividad
+- Wake: cualquier giro/click O toque táctil (CST816S polling I2C cada 100ms)
+- Círculo amarillo en normal, rojo en mute
+
 ## Pendiente
-- MIDI feedback: recibir CC7 de DADman para sincronizar valor en pantalla
+- MIDI feedback: recibir CC7 de DADman/Ableton para sincronizar valor en pantalla
+  - Testear con Ableton: CrowPanel como dispositivo MIDI, Ableton envía CC7 canal 1
+  - Si DADman manda feedback, el firmware ya puede recibirlo con MidiUSB.read()
 - Clip indicator: círculo parpadea rojo brevemente si volumen > umbral
 
 ## Repo
