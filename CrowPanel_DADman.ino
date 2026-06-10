@@ -8,6 +8,7 @@
 // Libraries: GFX Library for Arduino (Moon On Our Nation), Adafruit NeoPixel
 
 #include <Arduino_GFX_Library.h>
+#include <math.h>
 #include <Adafruit_NeoPixel.h>
 #include "USB.h"
 #include "USBMIDI.h"
@@ -70,6 +71,8 @@ bool  muted   = false;
 bool  lastBtn = HIGH;
 unsigned long lastDebounce  = 0;
 unsigned long lastActiveMs  = 0;   // para volver a normal tras girar
+unsigned long lastClickMs   = 0;   // para detectar doble click
+bool          waitingDouble = false;
 bool needsRedraw   = true;
 bool firstDraw     = true;
 uint8_t currentState = STATE_NORMAL;
@@ -114,11 +117,12 @@ void loop() {
   handleEncoder();
   handleButton();
 
-  // Volver a normal 1.5s después de dejar de girar
-  if (currentState == STATE_ACTIVE && !muted && millis() - lastActiveMs > 400) {
+  // Volver a normal tras dejar de girar
+  if (currentState == STATE_ACTIVE && !muted && millis() - lastActiveMs > 150) {
     currentState = STATE_NORMAL;
     needsRedraw  = true;
   }
+
 
   if (needsRedraw) {
     drawDisplay();
@@ -138,14 +142,14 @@ void handleEncoder() {
 
     if (encAccum >= 4) {
       dadDB = constrain(round((dadDB + 0.5f) * 2.0f) / 2.0f, DAD_MIN, DAD_MAX);
-      encAccum    = 0;
+      encAccum     = 0;
       lastActiveMs = millis();
       if (!muted) currentState = STATE_ACTIVE;
       sendVolume();
       needsRedraw = true;
     } else if (encAccum <= -4) {
       dadDB = constrain(round((dadDB - 0.5f) * 2.0f) / 2.0f, DAD_MIN, DAD_MAX);
-      encAccum    = 0;
+      encAccum     = 0;
       lastActiveMs = millis();
       if (!muted) currentState = STATE_ACTIVE;
       sendVolume();
@@ -161,11 +165,27 @@ void handleButton() {
   if (btn != lastBtn && (millis() - lastDebounce) > 50) {
     lastDebounce = millis();
     if (btn == LOW) {
-      muted = !muted;
-      currentState = muted ? STATE_MUTE : STATE_NORMAL;
-      MidiUSB.noteOn(MIDI_CH, NOTE_MUTE, muted ? 127 : 0);
-      firstDraw    = true;
-      needsRedraw  = true;
+      unsigned long now = millis();
+      if (waitingDouble && (now - lastClickMs) < 300) {
+        // ── Doble click: deshacer mute anterior y hacer reset
+        waitingDouble = false;
+        muted  = false;
+        dadDB  = 0.0f;
+        MidiUSB.noteOn(MIDI_CH, NOTE_MUTE, 0);
+        currentState = STATE_NORMAL;
+        sendVolume();
+        firstDraw   = true;
+        needsRedraw = true;
+      } else {
+        // ── Primer click: mute inmediato
+        waitingDouble = true;
+        lastClickMs   = now;
+        muted = !muted;
+        currentState = muted ? STATE_MUTE : STATE_NORMAL;
+        MidiUSB.noteOn(MIDI_CH, NOTE_MUTE, muted ? 127 : 0);
+        firstDraw   = true;
+        needsRedraw = true;
+      }
     }
   }
   lastBtn = btn;
@@ -205,7 +225,7 @@ void drawDisplay() {
     firstDraw = false;
   }
 
-  // 1. Sprite
+  // 2. Sprite
   drawSprite();
 
   // 2. Valor SPL
@@ -233,7 +253,7 @@ void drawDisplay() {
     gfx->print("dB SPL");
   }
 
-  // 5. Círculo SIEMPRE AL FINAL para que tape cualquier artefacto
+  // 5. Círculo SIEMPRE AL FINAL
   uint16_t circleColor = muted ? C_RED : C_YELLOW;
   gfx->drawCircle(120, 120, 118, circleColor);
   gfx->drawCircle(120, 120, 117, circleColor);
