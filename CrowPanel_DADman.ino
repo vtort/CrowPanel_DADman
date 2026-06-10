@@ -54,6 +54,7 @@ Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 #define C_GRAY   0x8410
 #define C_RED    0xF800
 #define C_YELLOW 0xFFE0
+#define C_PURPLE 0xA01F
 
 // ── Sprite posiciones por estado
 #define SPRITE_X_NORMAL  46
@@ -75,6 +76,8 @@ Arduino_GFX    *gfx  = new Arduino_GC9A01(bus, TFT_RST, 0, true);
 
 float dadDB   = 0.0f;
 bool  muted   = false;
+bool  dimmed  = false;
+float preDimDB = 0.0f;
 bool  lastBtn = HIGH;
 unsigned long lastDebounce  = 0;
 unsigned long lastActiveMs  = 0;   // para volver a normal tras girar
@@ -82,6 +85,8 @@ unsigned long lastActivityMs = 0;  // para apagar pantalla por inactividad
 bool screenOn = true;
 unsigned long lastClickMs   = 0;   // para detectar doble click
 bool          waitingDouble = false;
+unsigned long pressStart    = 0;
+bool          pressing      = false;
 bool needsRedraw   = true;
 bool firstDraw     = true;
 uint8_t currentState = STATE_NORMAL;
@@ -178,6 +183,19 @@ void loop() {
   }
 }
 
+// ── LEDs ──────────────────────────────────────────────────────────────────
+
+void updateLEDs() {
+  if (muted) {
+    for (int i = 0; i < LED_COUNT; i++) strip.setPixelColor(i, strip.Color(255, 0, 0));
+  } else if (dimmed) {
+    for (int i = 0; i < LED_COUNT; i++) strip.setPixelColor(i, strip.Color(160, 0, 248));
+  } else {
+    strip.clear();
+  }
+  strip.show();
+}
+
 // ── MIDI Input ────────────────────────────────────────────────────────────
 
 void handleMidiIn() {
@@ -237,27 +255,52 @@ void handleButton() {
   if (btn != lastBtn && (millis() - lastDebounce) > 50) {
     lastDebounce = millis();
     if (btn == LOW) {
-      unsigned long now = millis();
-      if (waitingDouble && (now - lastClickMs) < 300) {
-        // ── Doble click: deshacer mute anterior y hacer reset
-        waitingDouble = false;
-        muted  = false;
-        dadDB  = 0.0f;
-        MidiUSB.noteOn(MIDI_CH, NOTE_MUTE, 0);
-        currentState = STATE_NORMAL;
+      pressStart = millis();
+      pressing   = true;
+    } else {
+      // Botón soltado
+      unsigned long held = millis() - pressStart;
+      pressing = false;
+      if (held >= 600) {
+        // ── Long press: toggle DIM
+        lastActivityMs = millis();
+        if (dimmed) {
+          dimmed = false;
+          dadDB  = preDimDB;
+        } else {
+          dimmed   = true;
+          preDimDB = dadDB;
+          dadDB    = constrain(dadDB - 20.0f, DAD_MIN, DAD_MAX);
+        }
         sendVolume();
+        updateLEDs();
         firstDraw   = true;
         needsRedraw = true;
       } else {
-        // ── Primer click: mute inmediato
-        waitingDouble  = true;
-        lastClickMs    = now;
-        lastActivityMs = now;
-        muted = !muted;
-        currentState = muted ? STATE_MUTE : STATE_NORMAL;
-        MidiUSB.noteOn(MIDI_CH, NOTE_MUTE, muted ? 127 : 0);
-        firstDraw   = true;
-        needsRedraw = true;
+        // ── Click corto: mute / doble click reset
+        unsigned long now = millis();
+        if (waitingDouble && (now - lastClickMs) < 300) {
+          waitingDouble = false;
+          muted  = false;
+          dimmed = false;
+          dadDB  = 0.0f;
+          MidiUSB.noteOn(MIDI_CH, NOTE_MUTE, 0);
+          currentState = STATE_NORMAL;
+          sendVolume();
+          updateLEDs();
+          firstDraw   = true;
+          needsRedraw = true;
+        } else {
+          waitingDouble  = true;
+          lastClickMs    = now;
+          lastActivityMs = now;
+          muted = !muted;
+          currentState = muted ? STATE_MUTE : STATE_NORMAL;
+          MidiUSB.noteOn(MIDI_CH, NOTE_MUTE, muted ? 127 : 0);
+          updateLEDs();
+          firstDraw   = true;
+          needsRedraw = true;
+        }
       }
     }
   }
@@ -308,17 +351,22 @@ void drawDisplay() {
   char *v = buf;
   while (*v == ' ') v++;
   gfx->setTextSize(4);
-  gfx->setTextColor(muted ? C_RED : C_YELLOW);
+  gfx->setTextColor(muted ? C_RED : (dimmed ? C_PURPLE : C_YELLOW));
   int textW = strlen(v) * 24;
   gfx->setCursor((240 - textW) / 2, 30);
   gfx->print(v);
 
-  // 3. dB SPL / MUTE — siempre después del sprite, con bg negro (sin parpadeo)
+  // 3. dB SPL / MUTE / DIM — siempre después del sprite, con bg negro (sin parpadeo)
   if (muted) {
     gfx->setTextSize(2);
     gfx->setTextColor(C_RED, C_BG);
     gfx->setCursor(92, 64);
-    gfx->print("MUTE  ");  // espacios para borrar texto anterior
+    gfx->print("MUTE  ");
+  } else if (dimmed) {
+    gfx->setTextSize(2);
+    gfx->setTextColor(C_PURPLE, C_BG);
+    gfx->setCursor(100, 64);
+    gfx->print("DIM   ");
   } else {
     gfx->setTextSize(1);
     gfx->setTextColor(C_GRAY, C_BG);
@@ -327,7 +375,7 @@ void drawDisplay() {
   }
 
   // 5. Círculo SIEMPRE AL FINAL
-  uint16_t circleColor = muted ? C_RED : C_YELLOW;
+  uint16_t circleColor = muted ? C_RED : (dimmed ? C_PURPLE : C_YELLOW);
   gfx->drawCircle(120, 120, 118, circleColor);
   gfx->drawCircle(120, 120, 117, circleColor);
 }

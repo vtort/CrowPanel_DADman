@@ -27,8 +27,9 @@ Controlador de volumen master para DADman (software de audio para MTRX Studio) u
 - STATE_MUTE (2): gold_back → mute
 
 ## Interacción botón
-- **Click simple** → mute/unmute instantáneo
-- **Doble click** (< 300ms) → reset al volumen de referencia (0 dB DADman = 79 dB SPL)
+- **Click simple** → mute/unmute (en release)
+- **Doble click** (< 300ms entre clicks) → reset al volumen de referencia (0 dB DADman = 79 dB SPL)
+- **Long press** (≥ 600ms) → toggle DIM (-20 dB, guarda y restaura volumen previo)
 
 ## Display
 - Fondo negro, círculo amarillo (radio 117-118), rojo en mute
@@ -51,11 +52,16 @@ arduino-cli upload --fqbn "esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default
 
 ## Funciones implementadas
 - Encoder: 0.5 dB/detent, 4 subpasos
-- Click simple → mute/unmute instantáneo
-- Doble click (<300ms) → reset a 0 dB DADman (79 dB SPL)
+- Click simple → mute/unmute (en release)
+- Doble click (<300ms) → reset a 0 dB DADman (79 dB SPL), sale de mute y DIM
+- Long press (≥600ms) → toggle DIM (-20 dB, guarda y restaura volumen previo en preDimDB)
+- LEDs NeoPixel (GPIO48, 5 LEDs): rojo=mute, lila=DIM, apagado=normal
 - Sleep pantalla: apaga backlight tras 5s inactividad
 - Wake: cualquier giro/click O toque táctil (CST816S polling I2C cada 100ms)
-- Círculo amarillo en normal, rojo en mute
+- Círculo amarillo en normal, lila en DIM, rojo en mute
+- LEDs: apagados (normal), rojo (mute, RGB 255,0,0), lila (DIM, RGB 160,0,248). Mute tiene prioridad
+- DIM: label "DIM" lila, círculo lila, valor lila, LEDs lila. Color RGB565: C_PURPLE = 0xA01F
+- DIM guarda el volumen previo en preDimDB y lo restaura al salir
 
 ## MIDI - estado actual
 - CrowPanel envía CC7 canal 1 al girar → controla DADman/Ableton ✅
