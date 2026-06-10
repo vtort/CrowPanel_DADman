@@ -3,14 +3,15 @@
 // Hardware: CrowPanel ESP32-S3, GC9A01 240x240 round display, rotary encoder
 //
 // Board settings (arduino-cli):
-//   esp32:esp32:esp32s3:USBMode=usbotg,CDCOnBoot=default,FlashSize=16M,PartitionScheme=huge_app,PSRAM=opi
+//   esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,FlashSize=16M,PartitionScheme=huge_app,PSRAM=opi
 //
-// Libraries: GFX Library for Arduino (Moon On Our Nation)
+// Libraries: GFX Library for Arduino (Moon On Our Nation), Adafruit NeoPixel
 
 #include <Arduino_GFX_Library.h>
 #include <Adafruit_NeoPixel.h>
 #include "USB.h"
 #include "USBMIDI.h"
+#include "pikachu_sprites.h"
 
 #define LED_PIN   48
 #define LED_COUNT  5
@@ -31,7 +32,7 @@ Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 #define ENC_SW       41
 
 // ── MIDI ──────────────────────────────────────────────────────────────────
-#define MIDI_CH       0    // Canal 1 (0-indexed)
+#define MIDI_CH       0
 #define CC_VOLUME     7
 #define NOTE_MUTE    18
 
@@ -39,13 +40,23 @@ Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 #define DAD_MIN    -100.0f
 #define DAD_MAX      12.0f
 #define SPL_OFFSET   79.0f
-#define STEP_DB       0.125f
 
 // ── Colores ───────────────────────────────────────────────────────────────
 #define C_BG     0x0000
 #define C_GRAY   0x8410
 #define C_RED    0xF800
 #define C_YELLOW 0xFFE0
+
+// ── Sprite posiciones por estado
+#define SPRITE_X_NORMAL  46
+#define SPRITE_Y_NORMAL  58
+#define SPRITE_X_MUTE    36
+#define SPRITE_Y_MUTE    68
+
+// ── Estados del sprite ────────────────────────────────────────────────────
+#define STATE_NORMAL  0
+#define STATE_ACTIVE  1   // girando el knob
+#define STATE_MUTE    2
 
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -54,14 +65,16 @@ USBMIDI MidiUSB;
 Arduino_DataBus *bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, GFX_NOT_DEFINED, FSPI, true);
 Arduino_GFX    *gfx  = new Arduino_GC9A01(bus, TFT_RST, 0, true);
 
-float dadDB  = 0.0f;
-bool  muted  = false;
+float dadDB   = 0.0f;
+bool  muted   = false;
 bool  lastBtn = HIGH;
-unsigned long lastDebounce = 0;
-bool needsRedraw = true;
-bool firstDraw   = true;
+unsigned long lastDebounce  = 0;
+unsigned long lastActiveMs  = 0;   // para volver a normal tras girar
+bool needsRedraw   = true;
+bool firstDraw     = true;
+uint8_t currentState = STATE_NORMAL;
 
-// Encoder - polling con acumulación
+// Encoder
 int8_t  encAccum = 0;
 uint8_t encState = 0;
 const int8_t encTable[16] = {0,-1,1,0, 1,0,0,-1, -1,0,0,1, 0,1,-1,0};
@@ -69,34 +82,28 @@ const int8_t encTable[16] = {0,-1,1,0, 1,0,0,-1, -1,0,0,1, 0,1,-1,0};
 // ─────────────────────────────────────────────────────────────────────────
 
 void setup() {
-  // LEDs apagados
   strip.begin();
   strip.clear();
   strip.show();
 
-  // Power
   pinMode(LCD_PWR_EN1, OUTPUT);
   pinMode(LCD_PWR_EN2, OUTPUT);
   digitalWrite(LCD_PWR_EN1, HIGH);
   digitalWrite(LCD_PWR_EN2, HIGH);
 
-  // Backlight
   pinMode(TFT_BL, OUTPUT);
   analogWrite(TFT_BL, 200);
 
   delay(20);
 
-  // Display
   gfx->begin();
   gfx->fillScreen(C_BG);
 
-  // Encoder
   pinMode(ENC_A,  INPUT_PULLUP);
   pinMode(ENC_B,  INPUT_PULLUP);
   pinMode(ENC_SW, INPUT_PULLUP);
   encState = (digitalRead(ENC_A) << 1) | digitalRead(ENC_B);
 
-  // USB MIDI
   MidiUSB.begin();
   USB.begin();
 
@@ -106,6 +113,13 @@ void setup() {
 void loop() {
   handleEncoder();
   handleButton();
+
+  // Volver a normal 1.5s después de dejar de girar
+  if (currentState == STATE_ACTIVE && !muted && millis() - lastActiveMs > 400) {
+    currentState = STATE_NORMAL;
+    needsRedraw  = true;
+  }
+
   if (needsRedraw) {
     drawDisplay();
     needsRedraw = false;
@@ -122,15 +136,18 @@ void handleEncoder() {
     encState = ((encState << 2) | newState) & 0x0F;
     encAccum += encTable[encState];
 
-    // Cada detent completo = 4 sub-pasos
     if (encAccum >= 4) {
       dadDB = constrain(round((dadDB + 0.5f) * 2.0f) / 2.0f, DAD_MIN, DAD_MAX);
-      encAccum = 0;
+      encAccum    = 0;
+      lastActiveMs = millis();
+      if (!muted) currentState = STATE_ACTIVE;
       sendVolume();
       needsRedraw = true;
     } else if (encAccum <= -4) {
       dadDB = constrain(round((dadDB - 0.5f) * 2.0f) / 2.0f, DAD_MIN, DAD_MAX);
-      encAccum = 0;
+      encAccum    = 0;
+      lastActiveMs = millis();
+      if (!muted) currentState = STATE_ACTIVE;
       sendVolume();
       needsRedraw = true;
     }
@@ -145,8 +162,10 @@ void handleButton() {
     lastDebounce = millis();
     if (btn == LOW) {
       muted = !muted;
+      currentState = muted ? STATE_MUTE : STATE_NORMAL;
       MidiUSB.noteOn(MIDI_CH, NOTE_MUTE, muted ? 127 : 0);
-      needsRedraw = true;
+      firstDraw    = true;
+      needsRedraw  = true;
     }
   }
   lastBtn = btn;
@@ -164,43 +183,57 @@ void sendVolume() {
 
 float getSPL() { return dadDB + SPL_OFFSET; }
 
-void drawDisplay() {
-  float spl = getSPL();
+void drawSprite() {
+  const uint16_t *sprite;
+  int sx, sy;
+  if (currentState == STATE_MUTE) {
+    sprite = pikachu_mute;
+    sx = SPRITE_X_MUTE; sy = SPRITE_Y_MUTE;
+  } else if (currentState == STATE_ACTIVE) {
+    sprite = pikachu_active;
+    sx = SPRITE_X_NORMAL; sy = SPRITE_Y_NORMAL;
+  } else {
+    sprite = pikachu_normal;
+    sx = SPRITE_X_NORMAL; sy = SPRITE_Y_NORMAL;
+  }
+  gfx->draw16bitBeRGBBitmap(sx, sy, (uint16_t*)sprite, PIKACHU_NORMAL_SIZE, PIKACHU_NORMAL_SIZE);
+}
 
-  // Primera vez: fondo y label fijos
+void drawDisplay() {
   if (firstDraw) {
     gfx->fillScreen(C_BG);
-    gfx->setTextSize(2);
-    gfx->setTextColor(C_GRAY);
-    gfx->setCursor(82, 128);
-    gfx->print("dB SPL");
-    // Borde amarillo fijo
-    gfx->drawCircle(120, 120, 118, C_YELLOW);
-    gfx->drawCircle(120, 120, 117, C_YELLOW);
     firstDraw = false;
   }
 
-  // Borrar solo el área del número
-  gfx->fillRect(20, 70, 200, 55, C_BG);
+  // 1. Sprite
+  drawSprite();
 
-  // Valor SPL en amarillo
+  // 2. Valor SPL
+  gfx->fillRect(30, 28, 180, 36, C_BG);
   char buf[10];
-  dtostrf(spl, 5, 1, buf);
+  dtostrf(getSPL(), 5, 1, buf);
   char *v = buf;
   while (*v == ' ') v++;
-
   gfx->setTextSize(4);
-  gfx->setTextColor(C_YELLOW);
+  gfx->setTextColor(muted ? C_RED : C_YELLOW);
   int textW = strlen(v) * 24;
-  gfx->setCursor((240 - textW) / 2, 80);
+  gfx->setCursor((240 - textW) / 2, 30);
   gfx->print(v);
 
-  // Área MUTE
-  gfx->fillRect(40, 148, 160, 35, C_BG);
+  // 3. dB SPL / MUTE — siempre después del sprite, con bg negro (sin parpadeo)
   if (muted) {
-    gfx->setTextSize(3);
-    gfx->setTextColor(C_RED);
-    gfx->setCursor(78, 158);
-    gfx->print("MUTE");
+    gfx->setTextSize(2);
+    gfx->setTextColor(C_RED, C_BG);
+    gfx->setCursor(92, 64);
+    gfx->print("MUTE  ");  // espacios para borrar texto anterior
+  } else {
+    gfx->setTextSize(1);
+    gfx->setTextColor(C_GRAY, C_BG);
+    gfx->setCursor(95, 66);
+    gfx->print("dB SPL");
   }
+
+  // 5. Círculo SIEMPRE AL FINAL para que tape cualquier artefacto
+  gfx->drawCircle(120, 120, 118, C_YELLOW);
+  gfx->drawCircle(120, 120, 117, C_YELLOW);
 }
