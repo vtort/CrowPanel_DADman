@@ -38,15 +38,13 @@ Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 // ── Volumen ───────────────────────────────────────────────────────────────
 #define DAD_MIN    -100.0f
 #define DAD_MAX      12.0f
-#define SPL_OFFSET  -79.0f
-#define STEP_DB       0.5f
+#define SPL_OFFSET   79.0f
+#define STEP_DB       0.125f
 
 // ── Colores ───────────────────────────────────────────────────────────────
-#define C_BG    0x0000
-#define C_WHITE 0xFFFF
-#define C_GRAY  0x8410
-#define C_RED   0xF800
-#define C_GREEN 0x07E0
+#define C_BG     0x0000
+#define C_GRAY   0x8410
+#define C_RED    0xF800
 #define C_YELLOW 0xFFE0
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -58,10 +56,15 @@ Arduino_GFX    *gfx  = new Arduino_GC9A01(bus, TFT_RST, 0, true);
 
 float dadDB  = 0.0f;
 bool  muted  = false;
-int   lastA  = HIGH;
 bool  lastBtn = HIGH;
 unsigned long lastDebounce = 0;
 bool needsRedraw = true;
+bool firstDraw   = true;
+
+// Encoder - polling con acumulación
+int8_t  encAccum = 0;
+uint8_t encState = 0;
+const int8_t encTable[16] = {0,-1,1,0, 1,0,0,-1, -1,0,0,1, 0,1,-1,0};
 
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -91,7 +94,7 @@ void setup() {
   pinMode(ENC_A,  INPUT_PULLUP);
   pinMode(ENC_B,  INPUT_PULLUP);
   pinMode(ENC_SW, INPUT_PULLUP);
-  lastA = digitalRead(ENC_A);
+  encState = (digitalRead(ENC_A) << 1) | digitalRead(ENC_B);
 
   // USB MIDI
   MidiUSB.begin();
@@ -112,18 +115,26 @@ void loop() {
 // ── Encoder ───────────────────────────────────────────────────────────────
 
 void handleEncoder() {
-  int a = digitalRead(ENC_A);
-  if (a == LOW && lastA == HIGH) {
-    int b = digitalRead(ENC_B);
-    if (b == LOW) {
-      dadDB = min(DAD_MAX, dadDB + STEP_DB);
-    } else {
-      dadDB = max(DAD_MIN, dadDB - STEP_DB);
+  uint8_t a = digitalRead(ENC_A);
+  uint8_t b = digitalRead(ENC_B);
+  uint8_t newState = (a << 1) | b;
+  if (newState != (encState & 0x03)) {
+    encState = ((encState << 2) | newState) & 0x0F;
+    encAccum += encTable[encState];
+
+    // Cada detent completo = 4 sub-pasos
+    if (encAccum >= 4) {
+      dadDB = constrain(round((dadDB + 0.5f) * 2.0f) / 2.0f, DAD_MIN, DAD_MAX);
+      encAccum = 0;
+      sendVolume();
+      needsRedraw = true;
+    } else if (encAccum <= -4) {
+      dadDB = constrain(round((dadDB - 0.5f) * 2.0f) / 2.0f, DAD_MIN, DAD_MAX);
+      encAccum = 0;
+      sendVolume();
+      needsRedraw = true;
     }
-    sendVolume();
-    needsRedraw = true;
   }
-  lastA = a;
 }
 
 // ── Botón ─────────────────────────────────────────────────────────────────
@@ -153,47 +164,43 @@ void sendVolume() {
 
 float getSPL() { return dadDB + SPL_OFFSET; }
 
-uint16_t splColor() {
-  if (muted) return C_RED;
-  float spl = getSPL();
-  if (spl > -20.0f) return C_RED;
-  if (spl > -40.0f) return C_YELLOW;
-  return C_GREEN;
-}
-
 void drawDisplay() {
-  gfx->fillScreen(C_BG);
-
   float spl = getSPL();
-  uint16_t col = splColor();
 
-  // Valor SPL grande y centrado
+  // Primera vez: fondo y label fijos
+  if (firstDraw) {
+    gfx->fillScreen(C_BG);
+    gfx->setTextSize(2);
+    gfx->setTextColor(C_GRAY);
+    gfx->setCursor(82, 128);
+    gfx->print("dB SPL");
+    // Borde amarillo fijo
+    gfx->drawCircle(120, 120, 118, C_YELLOW);
+    gfx->drawCircle(120, 120, 117, C_YELLOW);
+    firstDraw = false;
+  }
+
+  // Borrar solo el área del número
+  gfx->fillRect(20, 70, 200, 55, C_BG);
+
+  // Valor SPL en amarillo
   char buf[10];
   dtostrf(spl, 5, 1, buf);
   char *v = buf;
   while (*v == ' ') v++;
 
   gfx->setTextSize(4);
-  gfx->setTextColor(col);
+  gfx->setTextColor(C_YELLOW);
   int textW = strlen(v) * 24;
   gfx->setCursor((240 - textW) / 2, 80);
   gfx->print(v);
 
-  // Unidad
-  gfx->setTextSize(2);
-  gfx->setTextColor(C_GRAY);
-  gfx->setCursor(82, 128);
-  gfx->print("dB SPL");
-
-  // MUTE
+  // Área MUTE
+  gfx->fillRect(40, 148, 160, 35, C_BG);
   if (muted) {
     gfx->setTextSize(3);
     gfx->setTextColor(C_RED);
     gfx->setCursor(78, 158);
     gfx->print("MUTE");
   }
-
-  // Borde circular
-  gfx->drawCircle(120, 120, 118, col);
-  gfx->drawCircle(120, 120, 117, col);
 }
