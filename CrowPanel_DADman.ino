@@ -234,6 +234,7 @@ void drawDisplay() {
   }
 
   // 5. Círculo SIEMPRE AL FINAL para que tape cualquier artefacto
-  gfx->drawCircle(120, 120, 118, C_YELLOW);
-  gfx->drawCircle(120, 120, 117, C_YELLOW);
+  uint16_t circleColor = muted ? C_RED : C_YELLOW;
+  gfx->drawCircle(120, 120, 118, circleColor);
+  gfx->drawCircle(120, 120, 117, circleColor);
 }
