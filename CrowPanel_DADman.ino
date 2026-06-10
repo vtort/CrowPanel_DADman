@@ -132,6 +132,7 @@ void setup() {
 void loop() {
   handleEncoder();
   handleButton();
+  handleMidiIn();
 
   // Volver a normal tras dejar de girar
   if (currentState == STATE_ACTIVE && !muted && millis() - lastActiveMs > 150) {
@@ -174,6 +175,28 @@ void loop() {
     }
     drawDisplay();
     needsRedraw = false;
+  }
+}
+
+// ── MIDI Input ────────────────────────────────────────────────────────────
+
+void handleMidiIn() {
+  midiEventPacket_t packet;
+  while (MidiUSB.readPacket(&packet)) {
+    // Control Change: byte1 = 0xB0|channel, byte2 = CC number, byte3 = value
+    uint8_t type    = packet.byte1 >> 4;
+    uint8_t channel = packet.byte1 & 0x0F;
+    if (type == 0x0B && channel == MIDI_CH && packet.byte2 == CC_VOLUME) {
+      dadDB = DAD_MIN + (packet.byte3 / 127.0f) * (DAD_MAX - DAD_MIN);
+      dadDB = round(dadDB * 2.0f) / 2.0f;
+      lastActivityMs = millis();
+      if (!screenOn) {
+        analogWrite(TFT_BL, 200);
+        screenOn  = true;
+        firstDraw = true;
+      }
+      needsRedraw = true;
+    }
   }
 }
 
