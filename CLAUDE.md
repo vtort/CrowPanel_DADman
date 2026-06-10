@@ -57,10 +57,13 @@ arduino-cli upload --fqbn "esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default
 - Wake: cualquier giro/click O toque táctil (CST816S polling I2C cada 100ms)
 - Círculo amarillo en normal, rojo en mute
 
+## MIDI - estado actual
+- CrowPanel envía CC7 canal 1 al girar → controla DADman/Ableton ✅
+- CrowPanel recibe CC7 canal 1 → actualiza valor en pantalla ✅ (testado con Ableton)
+- Pendiente: confirmar si DADman manda feedback MIDI de vuelta (probar mañana en el curro)
+
 ## Pendiente
-- MIDI feedback: recibir CC7 de DADman/Ableton para sincronizar valor en pantalla
-  - Testear con Ableton: CrowPanel como dispositivo MIDI, Ableton envía CC7 canal 1
-  - Si DADman manda feedback, el firmware ya puede recibirlo con MidiUSB.read()
+- Confirmar MIDI feedback de DADman (conectar y probar)
 - Clip indicator: círculo parpadea rojo brevemente si volumen > umbral
 
 ## Repo
