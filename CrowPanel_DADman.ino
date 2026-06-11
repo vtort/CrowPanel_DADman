@@ -1,22 +1,46 @@
-// CrowPanel 1.28" Round - DADman Master Volume Controller
+// CrowPanel 1.28" Round - Dolby Atmos Renderer Master Volume Controller
 //
 // Hardware: CrowPanel ESP32-S3, GC9A01 240x240 round display, rotary encoder
+// Control:  OSC over WiFi → Dolby Atmos Renderer puerto 8001
 //
 // Board settings (arduino-cli):
 //   esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,FlashSize=16M,PartitionScheme=huge_app,PSRAM=opi
 //
-// Libraries: GFX Library for Arduino (Moon On Our Nation), Adafruit NeoPixel
+// Libraries: GFX Library for Arduino (Moon On Our Nation), Adafruit NeoPixel, OSC (CNMAT)
 
 #include <Arduino_GFX_Library.h>
 #include <math.h>
 #include <Wire.h>
 #include <Adafruit_NeoPixel.h>
-#include "USB.h"
-#include "USBMIDI.h"
+#include <WiFi.h>
+#include <WiFiUdp.h>
+#include <OSCMessage.h>
 #include "pikachu_sprites.h"
 
-#define LED_PIN   48
-#define LED_COUNT  5
+// Prototipos
+void setup();
+void loop();
+void updateLEDs();
+void sendOSC_attenuation();
+void sendOSC_mute(bool on);
+void sendOSC_dim(bool on);
+void handleEncoder();
+void handleButton();
+float getSPL();
+void drawSprite();
+void drawDisplay();
+
+// ── WiFi / OSC ────────────────────────────────────────────────────────────
+const char* WIFI_SSID     = "TU_RED_WIFI";       // <- cambia esto
+const char* WIFI_PASSWORD = "TU_PASSWORD";        // <- cambia esto
+const char* RENDERER_IP   = "192.168.1.XXX";      // <- IP del Mac con el Renderer
+const int   OSC_PORT      = 8001;
+
+WiFiUDP Udp;
+
+// ── LEDs ──────────────────────────────────────────────────────────────────
+#define LED_PIN    48
+#define LED_COUNT   5
 Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 // ── Pins ──────────────────────────────────────────────────────────────────
@@ -37,16 +61,11 @@ Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 #define TOUCH_SCL     7
 #define TOUCH_RST     8
 #define TOUCH_INT     0
-#define TOUCH_ADDR 0x15   // dirección I2C del CST816S
-
-// ── MIDI ──────────────────────────────────────────────────────────────────
-#define MIDI_CH       0
-#define CC_VOLUME     7
-#define NOTE_MUTE    18
+#define TOUCH_ADDR 0x15
 
 // ── Volumen ───────────────────────────────────────────────────────────────
 #define DAD_MIN    -100.0f
-#define DAD_MAX      12.0f
+#define DAD_MAX       0.0f   // el Renderer solo atenúa, max = 0 dB
 #define SPL_OFFSET   79.0f
 
 // ── Colores ───────────────────────────────────────────────────────────────
@@ -56,20 +75,17 @@ Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 #define C_YELLOW 0xFFE0
 #define C_PURPLE 0xA01F
 
-// ── Sprite posiciones por estado
+// ── Sprite posiciones por estado ──────────────────────────────────────────
 #define SPRITE_X_NORMAL  46
 #define SPRITE_Y_NORMAL  58
 #define SPRITE_X_MUTE    36
 #define SPRITE_Y_MUTE    68
 
-// ── Estados del sprite ────────────────────────────────────────────────────
 #define STATE_NORMAL  0
-#define STATE_ACTIVE  1   // girando el knob
+#define STATE_ACTIVE  1
 #define STATE_MUTE    2
 
 // ─────────────────────────────────────────────────────────────────────────
-
-USBMIDI MidiUSB;
 
 Arduino_DataBus *bus = new Arduino_ESP32SPI(TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, GFX_NOT_DEFINED, FSPI, true);
 Arduino_GFX    *gfx  = new Arduino_GC9A01(bus, TFT_RST, 0, true);
@@ -77,19 +93,19 @@ Arduino_GFX    *gfx  = new Arduino_GC9A01(bus, TFT_RST, 0, true);
 float dadDB   = 0.0f;
 bool  muted   = false;
 bool  dimmed  = false;
-float preDimDB = 0.0f;
-bool  lastBtn = HIGH;
-unsigned long lastDebounce  = 0;
-unsigned long lastActiveMs  = 0;   // para volver a normal tras girar
-unsigned long lastActivityMs = 0;  // para apagar pantalla por inactividad
-bool screenOn = true;
-unsigned long lastClickMs   = 0;   // para detectar doble click
-bool          waitingDouble = false;
-unsigned long pressStart    = 0;
-bool          pressing      = false;
-bool needsRedraw   = true;
-bool firstDraw     = true;
-uint8_t currentState = STATE_NORMAL;
+
+bool          lastBtn        = HIGH;
+unsigned long lastDebounce   = 0;
+unsigned long lastActiveMs   = 0;
+unsigned long lastActivityMs = 0;
+bool          screenOn       = true;
+unsigned long lastClickMs    = 0;
+bool          waitingDouble  = false;
+unsigned long pressStart     = 0;
+bool          pressing       = false;
+bool          needsRedraw    = true;
+bool          firstDraw      = true;
+uint8_t       currentState   = STATE_NORMAL;
 
 // Encoder
 int8_t  encAccum = 0;
@@ -112,52 +128,53 @@ void setup() {
   analogWrite(TFT_BL, 200);
 
   delay(20);
-
   gfx->begin();
   gfx->fillScreen(C_BG);
 
-  pinMode(ENC_A,    INPUT_PULLUP);
-  pinMode(ENC_B,    INPUT_PULLUP);
-  pinMode(ENC_SW,   INPUT_PULLUP);
+  pinMode(ENC_A,     INPUT_PULLUP);
+  pinMode(ENC_B,     INPUT_PULLUP);
+  pinMode(ENC_SW,    INPUT_PULLUP);
   pinMode(TOUCH_INT, INPUT_PULLUP);
 
-  // Inicializar CST816S
   pinMode(TOUCH_RST, OUTPUT);
   digitalWrite(TOUCH_RST, LOW);  delay(10);
   digitalWrite(TOUCH_RST, HIGH); delay(50);
   Wire.begin(TOUCH_SDA, TOUCH_SCL);
   encState = (digitalRead(ENC_A) << 1) | digitalRead(ENC_B);
 
-  MidiUSB.begin();
-  USB.begin();
+  // ── WiFi ────────────────────────────────────────────────────────────────
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  // Muestra en pantalla que está conectando
+  gfx->setTextSize(1);
+  gfx->setTextColor(C_GRAY);
+  gfx->setCursor(60, 115);
+  gfx->print("Conectando WiFi...");
+  while (WiFi.status() != WL_CONNECTED) delay(300);
+  Udp.begin(8000);  // puerto local de escucha (no se usa, solo para inicializar)
 
+  gfx->fillScreen(C_BG);
   drawDisplay();
 }
 
 void loop() {
   handleEncoder();
   handleButton();
-  handleMidiIn();
 
-  // Volver a normal tras dejar de girar
   if (currentState == STATE_ACTIVE && !muted && millis() - lastActiveMs > 150) {
     currentState = STATE_NORMAL;
     needsRedraw  = true;
   }
 
-
-  // Apagar pantalla tras 5s de inactividad
   if (screenOn && millis() - lastActivityMs > 5000) {
     analogWrite(TFT_BL, 0);
     screenOn = false;
   }
 
-  // Toque en pantalla → encender sin cambiar nada (polling I2C cada 100ms)
   static unsigned long lastTouchPoll = 0;
   if (!screenOn && millis() - lastTouchPoll > 100) {
     lastTouchPoll = millis();
     Wire.beginTransmission(TOUCH_ADDR);
-    Wire.write(0x02);  // registro finger_num
+    Wire.write(0x02);
     if (Wire.endTransmission(false) == 0) {
       Wire.requestFrom(TOUCH_ADDR, 1);
       uint8_t fingers = Wire.available() ? Wire.read() : 0;
@@ -172,7 +189,6 @@ void loop() {
   }
 
   if (needsRedraw) {
-    // Si la pantalla estaba apagada, encenderla y redibujar todo
     if (!screenOn) {
       analogWrite(TFT_BL, 200);
       screenOn  = true;
@@ -196,26 +212,41 @@ void updateLEDs() {
   strip.show();
 }
 
-// ── MIDI Input ────────────────────────────────────────────────────────────
+// ── OSC ───────────────────────────────────────────────────────────────────
 
-void handleMidiIn() {
-  midiEventPacket_t packet;
-  while (MidiUSB.readPacket(&packet)) {
-    // Control Change: byte1 = 0xB0|channel, byte2 = CC number, byte3 = value
-    uint8_t type    = packet.byte1 >> 4;
-    uint8_t channel = packet.byte1 & 0x0F;
-    if (type == 0x0B && channel == MIDI_CH && packet.byte2 == CC_VOLUME) {
-      dadDB = DAD_MIN + (packet.byte3 / 127.0f) * (DAD_MAX - DAD_MIN);
-      dadDB = round(dadDB * 2.0f) / 2.0f;
-      lastActivityMs = millis();
-      if (!screenOn) {
-        analogWrite(TFT_BL, 200);
-        screenOn  = true;
-        firstDraw = true;
-      }
-      needsRedraw = true;
-    }
-  }
+void sendOSC_attenuation() {
+  // Convierte dB a amplitud lineal (0.0 - 1.0)
+  // dadDB máximo es 0 dB → amplitude 1.0
+  float amplitude = pow(10.0f, dadDB / 20.0f);
+  amplitude = constrain(amplitude, 0.0f, 1.0f);
+
+  OSCMessage msg("/dar/monitoring/attenuation");
+  msg.add(amplitude);
+  Udp.beginPacket(RENDERER_IP, OSC_PORT);
+  msg.send(Udp);
+  Udp.endPacket();
+  msg.empty();
+}
+
+void sendOSC_mute(bool on) {
+  // El Renderer no implementa OSC mute — simulamos con atenuación 0.0 (-inf dB)
+  float amplitude = on ? 0.0f : pow(10.0f, dadDB / 20.0f);
+  amplitude = constrain(amplitude, 0.0f, 1.0f);
+  OSCMessage msg("/dar/monitoring/attenuation");
+  msg.add(amplitude);
+  Udp.beginPacket(RENDERER_IP, OSC_PORT);
+  msg.send(Udp);
+  Udp.endPacket();
+  msg.empty();
+}
+
+void sendOSC_dim(bool on) {
+  OSCMessage msg("/dar/monitoring/dim");
+  msg.add((int32_t)(on ? 1 : 0));
+  Udp.beginPacket(RENDERER_IP, OSC_PORT);
+  msg.send(Udp);
+  Udp.endPacket();
+  msg.empty();
 }
 
 // ── Encoder ───────────────────────────────────────────────────────────────
@@ -230,11 +261,11 @@ void handleEncoder() {
 
     if (encAccum >= 4) {
       dadDB = constrain(round((dadDB + 0.5f) * 2.0f) / 2.0f, DAD_MIN, DAD_MAX);
-      encAccum     = 0;
+      encAccum       = 0;
       lastActiveMs   = millis();
       lastActivityMs = millis();
       if (!muted) currentState = STATE_ACTIVE;
-      sendVolume();
+      sendOSC_attenuation();
       needsRedraw = true;
     } else if (encAccum <= -4) {
       dadDB = constrain(round((dadDB - 0.5f) * 2.0f) / 2.0f, DAD_MIN, DAD_MAX);
@@ -242,7 +273,7 @@ void handleEncoder() {
       lastActiveMs   = millis();
       lastActivityMs = millis();
       if (!muted) currentState = STATE_ACTIVE;
-      sendVolume();
+      sendOSC_attenuation();
       needsRedraw = true;
     }
   }
@@ -258,45 +289,39 @@ void handleButton() {
       pressStart = millis();
       pressing   = true;
     } else {
-      // Botón soltado
       unsigned long held = millis() - pressStart;
       pressing = false;
       if (held >= 600) {
-        // ── Long press: toggle DIM
+        // Long press: toggle DIM (el Renderer aplica -20 dB internamente)
         lastActivityMs = millis();
-        if (dimmed) {
-          dimmed = false;
-          dadDB  = preDimDB;
-        } else {
-          dimmed   = true;
-          preDimDB = dadDB;
-          dadDB    = constrain(dadDB - 20.0f, DAD_MIN, DAD_MAX);
-        }
-        sendVolume();
+        dimmed = !dimmed;
+        sendOSC_dim(dimmed);
         updateLEDs();
         firstDraw   = true;
         needsRedraw = true;
       } else {
-        // ── Click corto: mute / doble click reset
         unsigned long now = millis();
         if (waitingDouble && (now - lastClickMs) < 300) {
+          // Doble click: reset a 0 dB, quitar mute y dim
           waitingDouble = false;
-          muted  = false;
-          dimmed = false;
-          dadDB  = 0.0f;
-          MidiUSB.noteOn(MIDI_CH, NOTE_MUTE, 0);
-          currentState = STATE_NORMAL;
-          sendVolume();
+          muted         = false;
+          dimmed        = false;
+          dadDB         = 0.0f;
+          currentState  = STATE_NORMAL;
+          sendOSC_mute(false);
+          sendOSC_dim(false);
+          sendOSC_attenuation();
           updateLEDs();
           firstDraw   = true;
           needsRedraw = true;
         } else {
+          // Click simple: toggle mute
           waitingDouble  = true;
           lastClickMs    = now;
           lastActivityMs = now;
           muted = !muted;
           currentState = muted ? STATE_MUTE : STATE_NORMAL;
-          MidiUSB.noteOn(MIDI_CH, NOTE_MUTE, muted ? 127 : 0);
+          sendOSC_mute(muted);
           updateLEDs();
           firstDraw   = true;
           needsRedraw = true;
@@ -305,14 +330,6 @@ void handleButton() {
     }
   }
   lastBtn = btn;
-}
-
-// ── MIDI ──────────────────────────────────────────────────────────────────
-
-void sendVolume() {
-  int ccVal = (int)((dadDB - DAD_MIN) / (DAD_MAX - DAD_MIN) * 127.0f);
-  ccVal = constrain(ccVal, 0, 127);
-  MidiUSB.controlChange(MIDI_CH, CC_VOLUME, ccVal);
 }
 
 // ── Display ───────────────────────────────────────────────────────────────
@@ -341,10 +358,8 @@ void drawDisplay() {
     firstDraw = false;
   }
 
-  // 2. Sprite
   drawSprite();
 
-  // 2. Valor SPL
   gfx->fillRect(30, 28, 180, 36, C_BG);
   char buf[10];
   dtostrf(getSPL(), 5, 1, buf);
@@ -356,7 +371,6 @@ void drawDisplay() {
   gfx->setCursor((240 - textW) / 2, 30);
   gfx->print(v);
 
-  // 3. dB SPL / MUTE / DIM — siempre después del sprite, con bg negro (sin parpadeo)
   if (muted) {
     gfx->setTextSize(2);
     gfx->setTextColor(C_RED, C_BG);
@@ -374,7 +388,6 @@ void drawDisplay() {
     gfx->print("dB SPL");
   }
 
-  // 5. Círculo SIEMPRE AL FINAL
   uint16_t circleColor = muted ? C_RED : (dimmed ? C_PURPLE : C_YELLOW);
   gfx->drawCircle(120, 120, 118, circleColor);
   gfx->drawCircle(120, 120, 117, circleColor);
