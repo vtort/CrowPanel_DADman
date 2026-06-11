@@ -1,76 +1,102 @@
-# CrowPanel DADman — Contexto del proyecto
+# CrowPanel Dolby Renderer — Guía completa
 
-## Qué es esto
-Controlador de volumen master para DADman (software de audio para MTRX Studio) usando un CrowPanel ESP32-S3 1.28" (pantalla redonda). El jogwheel controla el volumen, la pantalla muestra el valor en dB SPL.
+Controlador de volumen master para el **Dolby Atmos Renderer** usando un **CrowPanel ESP32-S3 1.28"** (pantalla redonda GC9A01 240x240). Un CrowPanel por sala de mezcla.
 
 ## Hardware
-- **Board**: CrowPanel ESP32-S3 1.28" round display (GC9A01, 240x240)
-- **FQBN arduino-cli**: `esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,FlashSize=16M,PartitionScheme=huge_app,PSRAM=opi`
-- **Puerto**: `/dev/cu.usbmodem11101` (Mac) — puede variar
-- **Flash**: BOOT+RST para entrar en bootloader, luego upload
+- **Board**: CrowPanel ESP32-S3 1.28" round display
+- **FQBN**: `esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,FlashSize=16M,PartitionScheme=huge_app,PSRAM=opi`
 
-## Pins críticos
-- LCD_PWR_EN1 = GPIO1, LCD_PWR_EN2 = GPIO2 → deben estar en HIGH o la pantalla no arranca
-- TFT_BL = GPIO46 → backlight via `analogWrite(46, 200)`
-- ENC_A = 45, ENC_B = 42, ENC_SW = 41
-- Touch CST816S I2C: SDA=6, SCL=7, RST=8, INT=0, addr=0x15
+## Protocolo de control
+OSC sobre WiFi UDP → Dolby Atmos Renderer puerto 8001
 
-## Lógica de volumen
-- DADman range: -100 a +12 dB
-- SPL offset: +79 (0 dB DADman = 79 dB SPL, referencia near-field Dolby Atmos)
-- Encoder: b==HIGH → aumenta volumen, 0.5 dB por detent (4 subpasos)
-- MIDI CC7 canal 0 = volumen, Note 18 canal 0 = mute
+| Comando OSC | Función |
+|-------------|---------|
+| `/dar/monitoring/attenuation f 0.0-1.0` | Volumen (1.0 = 0dB, 0.0 = -inf) |
+| `/dar/monitoring/dim i 0/1` | Dim on/off (-20dB interno del Renderer) |
+| `/dar/monitoring/mute i 0/1` | **No implementado** en el Renderer — el mute se simula con attenuation=0.0 |
 
-## Estados del sprite (Pikachu Gen 2, 168x168px, RGB565)
-- STATE_NORMAL (0): crystal_front → idle
-- STATE_ACTIVE (1): silver_front → girando knob (vuelve a normal a los 400ms)
-- STATE_MUTE (2): gold_back → mute
-
-## Interacción botón
-- **Click simple** → mute/unmute (en release)
-- **Doble click** (< 300ms entre clicks) → reset al volumen de referencia (0 dB DADman = 79 dB SPL)
-- **Long press** (≥ 600ms) → toggle DIM (-20 dB, guarda y restaura volumen previo)
-
-## Display
-- Fondo negro, círculo amarillo (radio 117-118), rojo en mute
-- Valor SPL en grande arriba (textSize 4), label "dB SPL" debajo (gris)
-- En mute: valor en rojo, label "MUTE" en rojo, círculo rojo
-- Sprites: `draw16bitRGBBitmap` (little endian — importante, BeRGB da colores erróneos)
-
-## Comandos flash
-```bash
-# Compilar y flashear (con board en bootloader: BOOT+RST)
-arduino-cli compile --fqbn "esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,FlashSize=16M,PartitionScheme=huge_app,PSRAM=opi" /ruta/al/proyecto
-arduino-cli upload --fqbn "esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,FlashSize=16M,PartitionScheme=huge_app,PSRAM=opi" -p /dev/cu.usbmodem11101 /ruta/al/proyecto
+## Configuración por sala
+En el .ino hay 4 valores a cambiar por sala:
+```cpp
+const char* WIFI_SSID     = "TU_RED_WIFI";
+const char* WIFI_PASSWORD = "TU_PASSWORD";
+const char* RENDERER_IP   = "192.168.1.XXX";  // IP del Mac con el Renderer
+#define SPL_OFFSET  79.0f  // 0dB Renderer = X dB SPL (varía por sala)
 ```
 
-## DADman configuración MIDI
-- MIDI Mode: Mackie C4
-- MIDI Input: ESP32 device (aparece como USB MIDI)
-- CC7 canal 1 = master volume
-- Note 18 canal 1 = mute toggle
+## Comportamiento del CrowPanel
+- **Encoder**: ±0.5 dB por detent
+- **Click simple**: toggle mute
+- **Doble click** (<300ms): reset a 0 dB, quita mute y dim
+- **Long press** (≥600ms): toggle DIM
+- **Pantalla**: SPL en grande, círculo amarillo/rojo/lila según estado
+- **LEDs** (5x NeoPixel GPIO48): apagado=normal, rojo=mute, lila=DIM
+- **Sleep**: pantalla apaga a los 5s, wake por toque táctil o encoder
 
-## Funciones implementadas
-- Encoder: 0.5 dB/detent, 4 subpasos
-- Click simple → mute/unmute (en release)
-- Doble click (<300ms) → reset a 0 dB DADman (79 dB SPL), sale de mute y DIM
-- Long press (≥600ms) → toggle DIM (-20 dB, guarda y restaura volumen previo en preDimDB)
-- LEDs NeoPixel (GPIO48, 5 LEDs): rojo=mute, lila=DIM, apagado=normal
-- Sleep pantalla: apaga backlight tras 5s inactividad
-- Wake: cualquier giro/click O toque táctil (CST816S polling I2C cada 100ms)
-- Círculo amarillo en normal, lila en DIM, rojo en mute
-- LEDs: apagados (normal), rojo (mute, RGB 255,0,0), lila (DIM, RGB 160,0,248). Mute tiene prioridad
-- DIM: label "DIM" lila, círculo lila, valor lila, LEDs lila. Color RGB565: C_PURPLE = 0xA01F
-- DIM guarda el volumen previo en preDimDB y lo restaura al salir
+## Instalar arduino-cli en un Mac nuevo (sin admin)
+```bash
+# Instalar arduino-cli
+mkdir -p ~/bin
+curl -L "https://github.com/arduino/arduino-cli/releases/download/v1.5.1/arduino-cli_1.5.1_macOS_ARM64.tar.gz" -o /tmp/arduino-cli.tar.gz
+tar -xzf /tmp/arduino-cli.tar.gz -C ~/bin arduino-cli
 
-## MIDI - estado actual
-- CrowPanel envía CC7 canal 1 al girar → controla DADman/Ableton ✅
-- CrowPanel recibe CC7 canal 1 → actualiza valor en pantalla ✅ (testado con Ableton)
-- Pendiente: confirmar si DADman manda feedback MIDI de vuelta (probar mañana en el curro)
+# Configurar ESP32 core
+~/bin/arduino-cli config init --overwrite
+~/bin/arduino-cli config add board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+~/bin/arduino-cli core update-index
+~/bin/arduino-cli core install esp32:esp32
 
-## Pendiente
-- Confirmar MIDI feedback de DADman (conectar y probar)
-- Clip indicator: círculo parpadea rojo brevemente si volumen > umbral
+# Instalar librerías manualmente (si downloads.arduino.cc no resuelve)
+mkdir -p ~/Documents/Arduino/libraries
+curl -L https://github.com/moononournation/Arduino_GFX/archive/refs/tags/v1.3.7.zip -o /tmp/gfx.zip
+curl -L https://github.com/adafruit/Adafruit_NeoPixel/archive/refs/heads/master.zip -o /tmp/neopixel.zip
+curl -L https://github.com/CNMAT/OSC/archive/refs/heads/master.zip -o /tmp/osc.zip
+cd ~/Documents/Arduino/libraries
+unzip -q /tmp/gfx.zip && mv Arduino_GFX-1.3.7 Arduino_GFX
+unzip -q /tmp/neopixel.zip && mv Adafruit_NeoPixel-master Adafruit_NeoPixel
+unzip -q /tmp/osc.zip && mv OSC-master OSC
 
-## Repo
-https://github.com/vtort/CrowPanel_DADman
+# Instalar ctags (necesario para compilar .ino)
+mkdir -p ~/Library/Arduino15/packages/builtin/tools/ctags/5.8-arduino11
+curl -L --header "Authorization: Bearer QQ==" \
+  "https://ghcr.io/v2/homebrew/core/ctags/blobs/sha256:614a735ab93afb5ed2a2f12a66819e0b35a1c644021670057d0cac0fbe9910ae" \
+  -o /tmp/ctags.tar.gz
+tar -xzf /tmp/ctags.tar.gz -C /tmp/
+cp /tmp/ctags/5.8_2/bin/ctags ~/Library/Arduino15/packages/builtin/tools/ctags/5.8-arduino11/ctags
+```
+
+> **Nota**: Usar Arduino_GFX v1.3.7 (no la última) — la versión actual requiere ESP32 core 3.x.
+> El hash de ctags es para macOS ARM64 Sequoia (15.x). Para otra versión buscar el hash en `https://formulae.brew.sh/api/formula/ctags.json`.
+
+## Compilar y flashear
+```bash
+# Clonar repo
+git clone https://github.com/vtort/CrowPanel_Dolby_Renderer.git
+cd CrowPanel_Dolby_Renderer
+
+# Editar credenciales (SSID, password, IP, SPL offset)
+# nano CrowPanel_DADman.ino
+
+# Compilar
+~/bin/arduino-cli compile \
+  --fqbn "esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,FlashSize=16M,PartitionScheme=huge_app,PSRAM=opi" \
+  --libraries ~/Documents/Arduino/libraries \
+  CrowPanel_DADman.ino
+
+# Ver puerto USB (conectar CrowPanel primero)
+ls /dev/cu.*
+
+# Flashear
+~/bin/arduino-cli upload \
+  --fqbn "esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,FlashSize=16M,PartitionScheme=huge_app,PSRAM=opi" \
+  -p /dev/cu.usbmodemXXXXXX \
+  CrowPanel_DADman.ino
+```
+
+> Si el CrowPanel no aparece en `/dev/cu.*`: usar cable con datos (no solo carga), conectar directamente al Mac (no hub), y si es la primera vez mantener BOOT pulsado al conectar.
+
+## Salas configuradas
+| Sala | SSID | IP Renderer | SPL offset |
+|------|------|-------------|------------|
+| 1 | TP-Link_E316 | 192.168.1.101 | 79 dB |
+| 2 | TP-Link_DB24 | 192.168.1.103 | 82 dB |
